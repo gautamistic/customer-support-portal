@@ -6,6 +6,8 @@ export type SalesforceCustomer = { Id: string; Name: string; Email?: string }
 export type SalesforceProduct = { Id: string; Name: string; Model_Number__c?: string; Purchase_Date__c?: string }
 export type SalesforceCase = { Id: string; CaseNumber: string; Subject: string; Status: string; Priority: string; CreatedDate: string; Description?: string; Product__r?: { Name: string } }
 export type SalesforceComment = { Id: string; CommentBody: string; CreatedDate: string; CreatedBy?: { Name: string } }
+type SalesforceFeedPost = { Id: string; Body: string; CreatedDate: string; CreatedBy?: { Name: string } }
+type SalesforceFeedComment = { Id: string; CommentBody: string; CreatedDate: string; CreatedBy?: { Name: string }; FeedItemId: string }
 export type SalesforceArticle = { Id: string; Title: string; Summary?: string; UrlName?: string }
 
 export class SalesforceError extends Error {
@@ -115,7 +117,22 @@ export class SalesforceClient {
   async getComments(customerId: string, caseId: string) {
     const ownedCase = await this.getCase(customerId, caseId)
     if (!ownedCase) throw new SalesforceError(404, 'Case not found')
-    return this.query<SalesforceComment>(`SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId.replaceAll("'", "\\'")}' ORDER BY CreatedDate ASC`)
+    const escapedCaseId = caseId.replaceAll("'", "\\'")
+    const [comments, feedPosts] = await Promise.allSettled([
+      this.query<SalesforceComment>(`SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${escapedCaseId}' ORDER BY CreatedDate ASC`),
+      this.query<SalesforceFeedPost>(`SELECT Id, Body, CreatedDate, CreatedBy.Name FROM FeedItem WHERE ParentId = '${escapedCaseId}' AND Type = 'TextPost' ORDER BY CreatedDate ASC`),
+    ])
+    if (comments.status === 'rejected' && feedPosts.status === 'rejected') throw comments.reason
+    const posts = feedPosts.status === 'fulfilled' ? feedPosts.value.records ?? [] : []
+    const feedComments = posts.length
+      ? await this.query<SalesforceFeedComment>(`SELECT Id, CommentBody, CreatedDate, CreatedBy.Name, FeedItemId FROM FeedComment WHERE FeedItemId IN (${posts.map((post) => `'${post.Id.replaceAll("'", "\\'")}'`).join(',')}) ORDER BY CreatedDate ASC`).catch(() => ({ records: [] as SalesforceFeedComment[] }))
+      : { records: [] as SalesforceFeedComment[] }
+    const records = [
+      ...(comments.status === 'fulfilled' ? comments.value.records ?? [] : []),
+      ...posts.map((post) => ({ Id: post.Id, CommentBody: post.Body, CreatedDate: post.CreatedDate, CreatedBy: post.CreatedBy })),
+      ...(feedComments.records ?? []).map((comment) => ({ Id: comment.Id, CommentBody: comment.CommentBody, CreatedDate: comment.CreatedDate, CreatedBy: comment.CreatedBy })),
+    ].sort((left, right) => new Date(left.CreatedDate).getTime() - new Date(right.CreatedDate).getTime())
+    return { records, totalSize: records.length }
   }
 
   async uploadFile(customerId: string, caseId: string, fileName: string, base64Data: string) {
