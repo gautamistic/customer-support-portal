@@ -96,7 +96,7 @@ function App() {
   const [caseDetailsVersion, setCaseDetailsVersion] = useState(0)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ sender: 'bot', text: 'Hi! I can help troubleshoot your Airwise device. What is going wrong?' }])
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ sender: 'bot', text: 'How can I help with your Airwise device today?' }])
   const [awaitingCaseDescription, setAwaitingCaseDescription] = useState(false)
   const [awaitingEscalationCaseNumber, setAwaitingEscalationCaseNumber] = useState(false)
   const [escalationCases, setEscalationCases] = useState<SalesforceCaseResponse[]>([])
@@ -107,14 +107,11 @@ function App() {
   const [chatLoading, setChatLoading] = useState(false)
 
   useEffect(() => {
-    if (!chatOpen || !user) return
-    setChatMessages((current) => current.length === 1 && current[0].sender === 'bot' ? [{ sender: 'bot', text: `Hi ${user.name}, I can help troubleshoot your Airwise device or create a support case. What is going wrong?` }] : current)
-  }, [chatOpen, user])
-
-  useEffect(() => {
     if (view !== 'Overview') return
     const dateElement = document.querySelector('.page-heading .eyebrow')
     if (dateElement) dateElement.textContent = getCurrentDateLabel()
+    const headingElement = document.querySelector('.page-heading h1')
+    if (headingElement) headingElement.textContent = user ? `Good Day, ${user.name}` : 'Good Day'
   }, [view, user])
 
   useEffect(() => {
