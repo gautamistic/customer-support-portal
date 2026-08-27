@@ -32,6 +32,8 @@ type SalesforceCaseResponse = {
   Priority: string
   CreatedDate: string
   Description?: string
+  Customer_Product__c?: string
+  Customer_Product__r?: { Name: string }
   Product__r?: { Name: string }
 }
 
@@ -44,7 +46,7 @@ type SalesforceCommentResponse = {
 
 const initialCases: CaseItem[] = []
 
-type ProductItem = { name: string; modelNumber: string; purchased: string; warranty: string; accent: 'mint' | 'coral' }
+type ProductItem = { id: string; name: string; modelNumber: string; purchased: string; warranty: string; accent: 'mint' | 'coral' }
 const products: ProductItem[] = []
 
 const articles = [
@@ -58,6 +60,10 @@ type ChatMessage = { sender: 'bot' | 'user'; text: string }
 
 function getInitials(name: string) {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+}
+
+function getCurrentDateLabel() {
+  return new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase()
 }
 
 const chatTopics = [
@@ -92,7 +98,11 @@ function App() {
   const [chatInput, setChatInput] = useState('')
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ sender: 'bot', text: 'Hi! I can help troubleshoot your Airwise device. What is going wrong?' }])
   const [awaitingCaseDescription, setAwaitingCaseDescription] = useState(false)
-    const [awaitingEscalationCaseNumber, setAwaitingEscalationCaseNumber] = useState(false)
+  const [awaitingEscalationCaseNumber, setAwaitingEscalationCaseNumber] = useState(false)
+  const [escalationCases, setEscalationCases] = useState<SalesforceCaseResponse[]>([])
+  const [loadingEscalationCases, setLoadingEscalationCases] = useState(false)
+  const [chatCases, setChatCases] = useState<SalesforceCaseResponse[]>([])
+  const [loadingChatCases, setLoadingChatCases] = useState(false)
   const [creatingCase, setCreatingCase] = useState(false)
   const [chatLoading, setChatLoading] = useState(false)
 
@@ -100,6 +110,12 @@ function App() {
     if (!chatOpen || !user) return
     setChatMessages((current) => current.length === 1 && current[0].sender === 'bot' ? [{ sender: 'bot', text: `Hi ${user.name}, I can help troubleshoot your Airwise device or create a support case. What is going wrong?` }] : current)
   }, [chatOpen, user])
+
+  useEffect(() => {
+    if (view !== 'Overview') return
+    const dateElement = document.querySelector('.page-heading .eyebrow')
+    if (dateElement) dateElement.textContent = getCurrentDateLabel()
+  }, [view, user])
 
   useEffect(() => {
     fetch(`${API_BASE_URL}/api/auth/me`, { credentials: 'include' })
@@ -118,11 +134,11 @@ function App() {
     ])
       .then(([caseResult, productResult]) => {
         if (caseResult.status === 'fulfilled' && caseResult.value.records?.length) {
-          const liveCases = caseResult.value.records.map((item) => ({ id: item.Id, number: item.CaseNumber, subject: item.Subject, product: item.Product__r?.Name ?? 'Supported product', status: ['In Progress', 'Waiting for Customer', 'Resolved', 'Escalated'].includes(item.Status) ? item.Status as CaseItem['status'] : 'In Progress', priority: ['High', 'Medium', 'Low'].includes(item.Priority) ? item.Priority as CaseItem['priority'] : 'Medium', created: new Date(item.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }), updated: 'Recently', description: item.Description ?? '', comments: [] }))
+          const liveCases = caseResult.value.records.map((item) => ({ id: item.Id, number: item.CaseNumber, subject: item.Subject, product: item.Customer_Product__r?.Name ?? item.Product__r?.Name ?? 'Supported product', status: ['In Progress', 'Waiting for Customer', 'Resolved', 'Escalated'].includes(item.Status) ? item.Status as CaseItem['status'] : 'In Progress', priority: ['High', 'Medium', 'Low'].includes(item.Priority) ? item.Priority as CaseItem['priority'] : 'Medium', created: new Date(item.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }), updated: 'Recently', description: item.Description ?? '', comments: [] }))
           setCases(liveCases)
           setSelectedCaseId(liveCases[0].id)
         } else if (caseResult.status === 'fulfilled') setCases([])
-        if (productResult.status === 'fulfilled' && productResult.value.records?.length) setProductList(productResult.value.records.map((item, index) => ({ name: item.Name, modelNumber: item.Model_Number__c ?? 'Model unavailable', purchased: item.Purchase_Date__c ? new Date(item.Purchase_Date__c).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) : 'Not available', warranty: 'Warranty information unavailable', accent: index % 2 ? 'coral' : 'mint' })))
+        if (productResult.status === 'fulfilled' && productResult.value.records?.length) setProductList(productResult.value.records.map((item, index) => ({ id: item.Id, name: item.Name, modelNumber: item.Model_Number__c ?? 'Model unavailable', purchased: item.Purchase_Date__c ? new Date(item.Purchase_Date__c).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) : 'Not available', warranty: 'Warranty information unavailable', accent: index % 2 ? 'coral' : 'mint' })))
         else if (productResult.status === 'fulfilled') setProductList([])
         const caseError = caseResult.status === 'rejected' ? caseResult.reason : undefined
         const productError = productResult.status === 'rejected' ? productResult.reason : undefined
@@ -148,7 +164,7 @@ function App() {
           ...item,
           number: caseData.CaseNumber,
           subject: caseData.Subject,
-          product: caseData.Product__r?.Name ?? item.product,
+          product: caseData.Customer_Product__r?.Name ?? caseData.Product__r?.Name ?? item.product,
           status: ['In Progress', 'Waiting for Customer', 'Resolved', 'Escalated'].includes(caseData.Status) ? caseData.Status as CaseItem['status'] : item.status,
           priority: ['High', 'Medium', 'Low'].includes(caseData.Priority) ? caseData.Priority as CaseItem['priority'] : item.priority,
           created: new Date(caseData.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
@@ -196,8 +212,10 @@ function App() {
     const form = new FormData(event.currentTarget)
     setCreatingCase(true)
     try {
-      const createdResponse = await apiRequest<{ id: string; caseNumber: string; status: string; subject: string; priority: CaseItem['priority'] }>('/api/cases', { method: 'POST', body: JSON.stringify({ subject: String(form.get('subject')), description: String(form.get('description')), priority: 'Medium' }) })
-      const created: CaseItem = { id: createdResponse.id, number: createdResponse.caseNumber, subject: createdResponse.subject, product: 'Supported product', status: createdResponse.status as CaseItem['status'], priority: createdResponse.priority, created: 'Today', updated: 'Just now', description: String(form.get('description')), comments: [] }
+      const customerProductId = String(form.get('customerProductId') ?? '')
+      const selectedProduct = productList.find((product) => product.id === customerProductId)
+      const createdResponse = await apiRequest<{ id: string; caseNumber: string; status: string; subject: string; priority: CaseItem['priority'] }>('/api/cases', { method: 'POST', body: JSON.stringify({ subject: String(form.get('subject')), description: String(form.get('description')), priority: 'Medium', customerProductId: customerProductId || undefined }) })
+      const created: CaseItem = { id: createdResponse.id, number: createdResponse.caseNumber, subject: createdResponse.subject, product: selectedProduct?.name ?? 'Supported product', status: createdResponse.status as CaseItem['status'], priority: createdResponse.priority, created: 'Today', updated: 'Just now', description: String(form.get('description')), comments: [] }
       setCases((current) => [created, ...current]); setSelectedCaseId(created.id)
       setShowCreate(false)
       setView('Cases')
@@ -213,7 +231,7 @@ function App() {
     const form = new FormData(event.currentTarget)
     try {
       const result = await apiRequest<{ Id: string; Name: string; Model_Number__c?: string; Purchase_Date__c?: string }>('/api/products', { method: 'POST', body: JSON.stringify({ name: String(form.get('name')), modelNumber: String(form.get('modelNumber')), purchaseDate: String(form.get('purchaseDate')) }) })
-      setProductList((current) => [{ name: result.Name, modelNumber: result.Model_Number__c ?? 'Model unavailable', purchased: result.Purchase_Date__c ? new Date(result.Purchase_Date__c).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) : 'Not available', warranty: 'Warranty information unavailable', accent: current.length % 2 ? 'coral' : 'mint' }, ...current])
+      setProductList((current) => [{ id: result.Id, name: result.Name, modelNumber: result.Model_Number__c ?? 'Model unavailable', purchased: result.Purchase_Date__c ? new Date(result.Purchase_Date__c).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) : 'Not available', warranty: 'Warranty information unavailable', accent: current.length % 2 ? 'coral' : 'mint' }, ...current])
       setShowRegister(false)
       setView('Products')
       setProductError('')
@@ -228,6 +246,7 @@ function App() {
     const lowerText = text.toLowerCase()
     const wantsCase = ['raise a case', 'create a case', 'open a case', 'support request', 'talk to support'].some((keyword) => lowerText.includes(keyword))
     const wantsEscalation = ['escalate', 'high priority', 'make it urgent', 'urgent case'].some((keyword) => lowerText.includes(keyword))
+    const wantsCaseList = ['show my cases', 'show cases', 'list my cases', 'list cases', 'my cases', 'cases raised by me', 'cases i raised'].some((keyword) => lowerText.includes(keyword))
     if (awaitingEscalationCaseNumber) {
       setChatMessages((current) => [...current, { sender: 'user', text }])
       setAwaitingEscalationCaseNumber(false)
@@ -268,9 +287,31 @@ function App() {
       setAwaitingCaseDescription(true)
       return
     }
+    if (wantsCaseList && !wantsEscalation) {
+      setLoadingChatCases(true)
+      setChatLoading(true)
+      apiRequest<{ records?: SalesforceCaseResponse[] }>('/api/cases')
+        .then((result) => {
+          const userCases = result.records ?? []
+          setChatCases(userCases)
+          setChatMessages((current) => [...current, { sender: 'bot', text: userCases.length ? 'Here are all the cases raised by you.' : 'You have not raised any cases yet.' }])
+        })
+        .catch((error) => setChatMessages((current) => [...current, { sender: 'bot', text: error instanceof Error ? error.message : 'I could not load your cases. Please try again.' }]))
+        .finally(() => { setLoadingChatCases(false); setChatLoading(false) })
+      return
+    }
     if (wantsEscalation) {
-      setAwaitingEscalationCaseNumber(true)
-      setChatMessages((current) => [...current, { sender: 'bot', text: 'Please send the Case Number you want me to escalate. I will verify it belongs to your account before updating Salesforce.' }])
+      setLoadingEscalationCases(true)
+      setChatLoading(true)
+      apiRequest<{ records?: SalesforceCaseResponse[] }>('/api/cases?status=In%20Progress')
+        .then((result) => {
+          const inProgressCases = result.records ?? []
+          setEscalationCases(inProgressCases)
+          setAwaitingEscalationCaseNumber(inProgressCases.length > 0)
+          setChatMessages((current) => [...current, { sender: 'bot', text: inProgressCases.length ? 'Which in-progress case would you like to escalate?' : 'You do not have any in-progress cases to escalate.' }])
+        })
+        .catch((error) => setChatMessages((current) => [...current, { sender: 'bot', text: error instanceof Error ? error.message : 'I could not load your in-progress cases. Please try again.' }]))
+        .finally(() => { setLoadingEscalationCases(false); setChatLoading(false) })
       return
     }
     setChatLoading(true)
@@ -310,10 +351,10 @@ function App() {
         {view === 'Knowledge' && <section className="page animate-in"><div className="knowledge-hero"><p className="eyebrow">SELF-SERVICE LIBRARY</p><h1>Find your answer.</h1><p>Quick, clear guides for getting the most from your Airwise products.</p><div className="large-search"><span>⌕</span><input autoFocus aria-label="Search knowledge base" value={knowledgeSearch} onChange={(event) => setKnowledgeSearch(event.target.value)} placeholder="Search guides, topics, or questions" /></div></div><div className="article-heading"><div><p className="eyebrow">{knowledgeSearch ? 'SEARCH RESULTS' : 'POPULAR GUIDES'}</p><h2>{knowledgeSearch ? `${filteredArticles.length} guides found` : 'Start here'}</h2></div></div><div className="article-grid">{filteredArticles.map((article, index) => <button className="article-card" type="button" key={article.title} onClick={() => setSelectedArticle(article)}><span className={`article-number n${index}`}>0{index + 1}</span><span className="article-card-copy"><span className="article-category">{article.category}</span><strong>{article.title}</strong><span>{article.read}</span></span><span className="article-arrow">↗</span></button>)}</div></section>}
       </main>
       <button className={`chat-launcher ${chatOpen ? 'open' : ''}`} type="button" aria-label={chatOpen ? 'Close troubleshooting chat' : 'Open troubleshooting chat'} onClick={() => setChatOpen((current) => !current)}><span className="chat-icon">◌</span><span>{chatOpen ? 'Close chat' : 'Support chat'}</span></button>
-      {chatOpen && <ChatPanel input={chatInput} messages={chatMessages} setInput={setChatInput} onSend={sendChatMessage} onClose={() => setChatOpen(false)} creatingCase={creatingCase} chatLoading={chatLoading} />}
+      {chatOpen && <ChatPanel input={chatInput} messages={chatMessages} setInput={setChatInput} onSend={sendChatMessage} onClose={() => setChatOpen(false)} creatingCase={creatingCase} chatLoading={chatLoading} loadingEscalationCases={loadingEscalationCases} loadingChatCases={loadingChatCases} awaitingEscalationCaseNumber={awaitingEscalationCaseNumber} escalationCases={escalationCases} chatCases={chatCases} />}
       {selectedArticle && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedArticle(null)}><article className="article-modal"><div className="modal-header"><div><p className="eyebrow">{selectedArticle.category}</p><h2>{selectedArticle.title}</h2></div><button type="button" className="close-button" aria-label="Close article" onClick={() => setSelectedArticle(null)}>×</button></div><p>{selectedArticle.content}</p><button type="button" className="primary-button" onClick={() => setSelectedArticle(null)}>Done</button></article></div>}
       {showRegister && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowRegister(false)}><form className="modal" onSubmit={createProduct}><div className="modal-header"><div><p className="eyebrow">YOUR DEVICES</p><h2>Register a product</h2></div><button type="button" className="close-button" aria-label="Close registration form" onClick={() => setShowRegister(false)}>×</button></div><label>Product name<input name="name" required placeholder="AeroSense Pro" /></label><label>Model number<input name="modelNumber" required placeholder="AS-PRO-100" /></label><label>Date of purchase<input name="purchaseDate" type="date" required /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowRegister(false)}>Cancel</button><button className="primary-button" type="submit">Add product <span>→</span></button></div></form></div>}
-      {showCreate && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !creatingCase && setShowCreate(false)}><form className="modal" onSubmit={createCase}><div className="modal-header"><div><p className="eyebrow">NEW REQUEST</p><h2>Create a support case</h2></div><button type="button" className="close-button" onClick={() => !creatingCase && setShowCreate(false)} disabled={creatingCase}>×</button></div><label>Subject<input name="subject" required placeholder="What can we help with?" /></label><label>Description<textarea name="description" required placeholder="Tell us what happened..." rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowCreate(false)} disabled={creatingCase}>Cancel</button><button className="primary-button" type="submit" disabled={creatingCase}>{creatingCase ? <><span className="loading-spinner" aria-hidden="true" /> Creating case...</> : <>Submit case <span>→</span></>}</button></div></form></div>}
+      {showCreate && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !creatingCase && setShowCreate(false)}><form className="modal" onSubmit={createCase}><div className="modal-header"><div><p className="eyebrow">NEW REQUEST</p><h2>Create a support case</h2></div><button type="button" className="close-button" onClick={() => !creatingCase && setShowCreate(false)} disabled={creatingCase}>×</button></div><label>Product<select name="customerProductId" defaultValue="" required={productList.length > 0}><option value="">Select a registered product</option>{productList.map((product) => <option value={product.id} key={product.id}>{product.name}</option>)}</select></label><label>Subject<input name="subject" required placeholder="What can we help with?" /></label><label>Description<textarea name="description" required placeholder="Tell us what happened..." rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowCreate(false)} disabled={creatingCase}>Cancel</button><button className="primary-button" type="submit" disabled={creatingCase}>{creatingCase ? <><span className="loading-spinner" aria-hidden="true" /> Creating case...</> : <>Submit case <span>→</span></>}</button></div></form></div>}
     </div>
   )
 }
@@ -357,12 +398,12 @@ function CaseRow({ item, onClick, selected = false }: { item: CaseItem; onClick:
 
 function ProductRow({ product }: { product: ProductItem }) { return <div className="product-row"><span className={`product-thumb ${product.accent}`}><span /></span><span><strong>{product.name}</strong><small>{product.modelNumber}</small></span><span className="warranty-dot">●</span></div> }
 
-function ChatPanel({ input, messages, setInput, onSend, onClose, creatingCase, chatLoading }: { input: string; messages: ChatMessage[]; setInput: (value: string) => void; onSend: (message?: string) => void; onClose: () => void; creatingCase: boolean; chatLoading: boolean }) {
+function ChatPanel({ input, messages, setInput, onSend, onClose, creatingCase, chatLoading, loadingEscalationCases, loadingChatCases, awaitingEscalationCaseNumber, escalationCases, chatCases }: { input: string; messages: ChatMessage[]; setInput: (value: string) => void; onSend: (message?: string) => void; onClose: () => void; creatingCase: boolean; chatLoading: boolean; loadingEscalationCases: boolean; loadingChatCases: boolean; awaitingEscalationCaseNumber: boolean; escalationCases: SalesforceCaseResponse[]; chatCases: SalesforceCaseResponse[] }) {
   const [topicsOpen, setTopicsOpen] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, creatingCase, chatLoading])
   const send = (message?: string) => { setTopicsOpen(false); onSend(message) }
-  return <section className="chat-panel" aria-label="Troubleshooting chat"><header className="chat-header"><div><span className="eyebrow">AIRWISE ASSIST</span><h2>Troubleshoot together</h2></div><button type="button" className="close-button" aria-label="Close chat" onClick={onClose}>×</button></header><div className="chat-messages" aria-live="polite">{messages.map((message, index) => <div className={`chat-message ${message.sender}`} key={`${message.sender}-${index}`}><span className="chat-avatar">{message.sender === 'bot' ? 'A' : 'You'}</span><p>{message.text}</p></div>)}{(creatingCase || chatLoading) && <div className="chat-message bot"><span className="chat-avatar">A</span><p className="creating-message"><span className="loading-spinner" aria-hidden="true" /> {creatingCase ? 'Creating your case...' : 'Thinking...'}</p></div>}<div ref={messagesEndRef} /></div><div className={`chat-topics ${topicsOpen ? 'expanded' : 'collapsed'}`}><button type="button" className="chat-topics-toggle" aria-expanded={topicsOpen} onClick={() => setTopicsOpen((current) => !current)}><small>TRY A TOPIC</small><span aria-hidden="true">{topicsOpen ? '−' : '+'}</span></button>{topicsOpen && <div className="chat-topic-options">{chatTopics.map((topic) => <button type="button" key={topic.label} onClick={() => send(topic.label)} disabled={creatingCase || chatLoading}>{topic.label}</button>)}</div>}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); send() }}><input aria-label="Describe your issue" value={input} onChange={(event) => setInput(event.target.value)} placeholder={creatingCase ? 'Creating case...' : 'Share what happened...'} disabled={creatingCase || chatLoading} /><button type="submit" aria-label="Send message" disabled={creatingCase || chatLoading}>{creatingCase || chatLoading ? <span className="loading-spinner" aria-hidden="true" /> : '→'}</button></form></section>
+  return <section className="chat-panel" aria-label="Troubleshooting chat"><header className="chat-header"><div><span className="eyebrow">AIRWISE ASSIST</span><h2>Troubleshoot together</h2></div><button type="button" className="close-button" aria-label="Close chat" onClick={onClose}>×</button></header><div className="chat-messages" aria-live="polite">{messages.map((message, index) => <div className={`chat-message ${message.sender}`} key={`${message.sender}-${index}`}><span className="chat-avatar">{message.sender === 'bot' ? 'A' : 'You'}</span><p>{message.text}</p></div>)}{(creatingCase || chatLoading) && <div className="chat-message bot"><span className="chat-avatar">A</span><p className="creating-message"><span className="loading-spinner" aria-hidden="true" /> {creatingCase ? 'Creating your case...' : loadingEscalationCases || loadingChatCases ? 'Loading your cases...' : 'Thinking...'}</p></div>}<div ref={messagesEndRef} /></div>{chatCases.length > 0 && !awaitingEscalationCaseNumber && <div className="chat-case-list" aria-label="Cases raised by you">{chatCases.map((item) => <div className="chat-case-summary" key={item.Id}><div><strong>{item.CaseNumber}</strong><span>{item.Subject}</span></div><div><span className={`status-pill ${item.Status.toLowerCase().replaceAll(' ', '-')}`}>{item.Status}</span><small>{item.Priority} priority</small></div></div>)}</div>}{awaitingEscalationCaseNumber && <div className="chat-case-options" aria-label="In-progress cases">{escalationCases.map((item) => <button type="button" key={item.Id} onClick={() => send(item.CaseNumber)} disabled={creatingCase || chatLoading}><strong>{item.CaseNumber}</strong><span>{item.Subject}</span></button>)}</div>}<div className={`chat-topics ${topicsOpen ? 'expanded' : 'collapsed'}`}><button type="button" className="chat-topics-toggle" aria-expanded={topicsOpen} onClick={() => setTopicsOpen((current) => !current)}><small>TRY A TOPIC</small><span aria-hidden="true">{topicsOpen ? '−' : '+'}</span></button>{topicsOpen && <div className="chat-topic-options">{chatTopics.map((topic) => <button type="button" key={topic.label} onClick={() => send(topic.label)} disabled={creatingCase || chatLoading}>{topic.label}</button>)}</div>}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); send() }}><input aria-label="Describe your issue" value={input} onChange={(event) => setInput(event.target.value)} placeholder={creatingCase ? 'Creating case...' : 'Share what happened...'} disabled={creatingCase || chatLoading} /><button type="submit" aria-label="Send message" disabled={creatingCase || chatLoading}>{creatingCase || chatLoading ? <span className="loading-spinner" aria-hidden="true" /> : '→'}</button></form></section>
 }
 
 function CaseDetail({ item, newComment, setNewComment, addComment }: { item: CaseItem; newComment: string; setNewComment: (value: string) => void; addComment: () => void }) {

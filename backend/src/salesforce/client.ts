@@ -3,8 +3,8 @@ import { assertSalesforceConfig, config } from '../config.js'
 type SalesforceResponse<T> = { records?: T[]; totalSize?: number } & T
 
 export type SalesforceCustomer = { Id: string; Name: string; Email?: string }
-export type SalesforceProduct = { Id: string; Name: string; Model_Number__c?: string; Purchase_Date__c?: string }
-export type SalesforceCase = { Id: string; CaseNumber: string; Subject: string; Status: string; Priority: string; CreatedDate: string; Description?: string; Product__r?: { Name: string } }
+export type SalesforceProduct = { Id: string; Name: string; Model_Number__c?: string; Purchase_Date__c?: string; Email__c?: string }
+export type SalesforceCase = { Id: string; CaseNumber: string; Subject: string; Status: string; Priority: string; CreatedDate: string; Description?: string; Email__c?: string; Customer_Product__c?: string; Customer_Product__r?: { Name: string }; Product__r?: { Name: string } }
 export type SalesforceComment = { Id: string; CommentBody: string; CreatedDate: string; CreatedBy?: { Name: string } }
 type SalesforceFeedPost = { Id: string; Body: string; CreatedDate: string; CreatedBy?: { Name: string } }
 type SalesforceFeedComment = { Id: string; CommentBody: string; CreatedDate: string; CreatedBy?: { Name: string }; FeedItemId: string }
@@ -16,6 +16,10 @@ export class SalesforceError extends Error {
 
 function salesforceContactId(customerId: string) {
   return /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(customerId) ? customerId : config.DEV_CUSTOMER_ID
+}
+
+function salesforceEmail(email: string) {
+  return email.trim().toLowerCase().replaceAll("'", "\\'")
 }
 
 export class SalesforceClient {
@@ -63,59 +67,62 @@ export class SalesforceClient {
     return result.records?.[0]
   }
 
-  async getProducts(customerId: string) {
-    const contactId = salesforceContactId(customerId)
-    return this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c FROM Customer_Product__c WHERE Contact__c = '${contactId}'`)
+  async getProducts(customerId: string, email: string) {
+    return this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c, Email__c FROM Customer_Product__c WHERE Email__c = '${salesforceEmail(email)}'`)
   }
 
-  async createProduct(customerId: string, fields: { name: string; modelNumber: string; purchaseDate: string }) {
+  async createProduct(customerId: string, email: string, fields: { name: string; modelNumber: string; purchaseDate: string }) {
     const contactId = salesforceContactId(customerId)
-    const created = await this.request<{ id: string }>('/sobjects/Customer_Product__c', { method: 'POST', body: JSON.stringify({ Contact__c: contactId, Name: fields.name, Model_Number__c: fields.modelNumber, Purchase_Date__c: fields.purchaseDate }) })
-    const result = await this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c FROM Customer_Product__c WHERE Id = '${created.id.replaceAll("'", "\\'")}' AND Contact__c = '${contactId}' LIMIT 1`)
+    const normalizedEmail = email.trim().toLowerCase()
+    const created = await this.request<{ id: string }>('/sobjects/Customer_Product__c', { method: 'POST', body: JSON.stringify({ Contact__c: contactId, Email__c: normalizedEmail, Name: fields.name, Model_Number__c: fields.modelNumber, Purchase_Date__c: fields.purchaseDate }) })
+    const result = await this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c, Email__c FROM Customer_Product__c WHERE Id = '${created.id.replaceAll("'", "\\'")}' AND Email__c = '${salesforceEmail(email)}' LIMIT 1`)
     const product = result.records?.[0]
     if (!product) throw new SalesforceError(502, 'Salesforce created the product but did not return its details')
     return product
   }
 
-  async getCases(customerId: string, status?: string) {
-    const contactId = salesforceContactId(customerId)
-    const statusClause = status ? ` AND Status = '${status.replaceAll("'", "\\'")}'` : ''
-    return this.query<SalesforceCase>(`SELECT Id, CaseNumber, Subject, Status, Priority, CreatedDate, Description FROM Case WHERE ContactId = '${contactId}'${statusClause} ORDER BY CreatedDate DESC LIMIT 50`)
+  async getCases(customerId: string, email: string, status?: string) {
+    const statusClause = status === 'In Progress' ? " AND Status IN ('New', 'Escalated')" : status ? ` AND Status = '${status.replaceAll("'", "\\'")}'` : ''
+    return this.query<SalesforceCase>(`SELECT Id, CaseNumber, Subject, Status, Priority, CreatedDate, Description, Customer_Product__c, Customer_Product__r.Name FROM Case WHERE Email__c = '${salesforceEmail(email)}'${statusClause} ORDER BY CreatedDate DESC LIMIT 50`)
   }
 
-  async createCase(fields: Record<string, string>) {
+  async createCase(fields: Record<string, string>, email: string) {
     const caseFields = fields.ContactId ? { ...fields, ContactId: salesforceContactId(fields.ContactId) } : fields
+    caseFields.Email__c = email.trim().toLowerCase()
+    if (caseFields.Customer_Product__c) {
+      const productId = caseFields.Customer_Product__c.replaceAll("'", "\\'")
+      const product = await this.query<SalesforceProduct>(`SELECT Id FROM Customer_Product__c WHERE Id = '${productId}' AND Email__c = '${salesforceEmail(email)}' LIMIT 1`)
+      if (!product.records?.[0]) throw new SalesforceError(404, 'Customer product not found')
+    }
     const created = await this.request<{ id: string; success: boolean; errors: string[] }>('/sobjects/Case', { method: 'POST', body: JSON.stringify(caseFields) })
-    const result = await this.query<Pick<SalesforceCase, 'Id' | 'CaseNumber' | 'Status' | 'Subject'>>(`SELECT Id, CaseNumber, Status, Subject FROM Case WHERE Id = '${created.id.replaceAll("'", "\\'")}' LIMIT 1`)
+    const result = await this.query<Pick<SalesforceCase, 'Id' | 'CaseNumber' | 'Status' | 'Subject' | 'Customer_Product__c'>>(`SELECT Id, CaseNumber, Status, Subject, Customer_Product__c FROM Case WHERE Id = '${created.id.replaceAll("'", "\\'")}' LIMIT 1`)
     const record = result.records?.[0]
     if (!record) throw new SalesforceError(502, 'Salesforce created the Case but did not return its details')
     return { ...created, caseNumber: record.CaseNumber, status: record.Status, subject: record.Subject }
   }
 
-  async getCase(customerId: string, caseId: string) {
-    const contactId = salesforceContactId(customerId)
-    const result = await this.query<SalesforceCase>(`SELECT Id, CaseNumber, Subject, Status, Priority, CreatedDate, Description FROM Case WHERE Id = '${caseId.replaceAll("'", "\\'")}' AND ContactId = '${contactId}' LIMIT 1`)
+  async getCase(customerId: string, email: string, caseId: string) {
+    const result = await this.query<SalesforceCase>(`SELECT Id, CaseNumber, Subject, Status, Priority, CreatedDate, Description, Customer_Product__c, Customer_Product__r.Name FROM Case WHERE Id = '${caseId.replaceAll("'", "\\'")}' AND Email__c = '${salesforceEmail(email)}' LIMIT 1`)
     return result.records?.[0]
   }
 
-  async escalateCase(customerId: string, caseNumber: string) {
-    const contactId = salesforceContactId(customerId)
+  async escalateCase(customerId: string, email: string, caseNumber: string) {
     const escapedNumber = caseNumber.replaceAll("'", "\\'")
-    const result = await this.query<Pick<SalesforceCase, 'Id' | 'CaseNumber' | 'Status' | 'Priority'>>(`SELECT Id, CaseNumber, Status, Priority FROM Case WHERE CaseNumber = '${escapedNumber}' AND ContactId = '${contactId}' LIMIT 1`)
+    const result = await this.query<Pick<SalesforceCase, 'Id' | 'CaseNumber' | 'Status' | 'Priority'>>(`SELECT Id, CaseNumber, Status, Priority FROM Case WHERE CaseNumber = '${escapedNumber}' AND Email__c = '${salesforceEmail(email)}' LIMIT 1`)
     const item = result.records?.[0]
     if (!item) throw new SalesforceError(404, 'Case not found')
     await this.request<void>(`/sobjects/Case/${item.Id}`, { method: 'PATCH', body: JSON.stringify({ Status: 'Escalated', Priority: 'High' }) })
     return { ...item, Status: 'Escalated', Priority: 'High' }
   }
 
-  async addComment(customerId: string, caseId: string, body: string) {
-    const ownedCase = await this.getCase(customerId, caseId)
+  async addComment(customerId: string, email: string, caseId: string, body: string) {
+    const ownedCase = await this.getCase(customerId, email, caseId)
     if (!ownedCase) throw new SalesforceError(404, 'Case not found')
     return this.request<{ id: string }>('/sobjects/CaseComment', { method: 'POST', body: JSON.stringify({ ParentId: caseId, CommentBody: body, IsPublished: true }) })
   }
 
-  async getComments(customerId: string, caseId: string) {
-    const ownedCase = await this.getCase(customerId, caseId)
+  async getComments(customerId: string, email: string, caseId: string) {
+    const ownedCase = await this.getCase(customerId, email, caseId)
     if (!ownedCase) throw new SalesforceError(404, 'Case not found')
     const escapedCaseId = caseId.replaceAll("'", "\\'")
     const [comments, feedPosts] = await Promise.allSettled([
@@ -135,8 +142,8 @@ export class SalesforceClient {
     return { records, totalSize: records.length }
   }
 
-  async uploadFile(customerId: string, caseId: string, fileName: string, base64Data: string) {
-    const ownedCase = await this.getCase(customerId, caseId)
+  async uploadFile(customerId: string, email: string, caseId: string, fileName: string, base64Data: string) {
+    const ownedCase = await this.getCase(customerId, email, caseId)
     if (!ownedCase) throw new SalesforceError(404, 'Case not found')
     const content = await this.request<{ id: string }>('/sobjects/ContentVersion', { method: 'POST', body: JSON.stringify({ Title: fileName, PathOnClient: fileName, VersionData: base64Data }) })
     return this.request<{ id: string }>('/sobjects/ContentDocumentLink', { method: 'POST', body: JSON.stringify({ ContentDocumentId: content.id, LinkedEntityId: caseId, ShareType: 'V' }) })

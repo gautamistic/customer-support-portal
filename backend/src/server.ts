@@ -111,25 +111,25 @@ app.post('/api/chat', async (req, res) => {
 })
 
 app.get('/api/products', async (req, res, next) => {
-  try { res.json(await salesforce.getProducts(req.customerId!)) } catch (error) { next(error) }
+  try { res.json(await salesforce.getProducts(req.customerId!, req.customerEmail!)) } catch (error) { next(error) }
 })
 
 const productSchema = z.object({ name: z.string().trim().min(1).max(255), modelNumber: z.string().trim().min(1).max(100), purchaseDate: z.string().date() })
 app.post('/api/products', async (req, res, next) => {
   try {
     const input = productSchema.parse(req.body)
-    const product = await salesforce.createProduct(req.customerId!, input)
+    const product = await salesforce.createProduct(req.customerId!, req.customerEmail!, input)
     return res.status(201).json(product)
   } catch (error) { return next(error) }
 })
 
 app.get('/api/cases', async (req, res, next) => {
-  try { res.json(await salesforce.getCases(req.customerId!, typeof req.query.status === 'string' ? req.query.status : undefined)) } catch (error) { next(error) }
+  try { res.json(await salesforce.getCases(req.customerId!, req.customerEmail!, typeof req.query.status === 'string' ? req.query.status : undefined)) } catch (error) { next(error) }
 })
 
 app.get('/api/cases/:caseId', async (req, res, next) => {
   try {
-    const item = await salesforce.getCase(req.customerId!, req.params.caseId)
+    const item = await salesforce.getCase(req.customerId!, req.customerEmail!, req.params.caseId)
     if (!item) return res.status(404).json({ error: { code: 'CASE_NOT_FOUND', message: 'Case not found' } })
     return res.json(item)
   } catch (error) { return next(error) }
@@ -139,7 +139,7 @@ const escalationSchema = z.object({ caseNumber: z.string().trim().min(1).max(40)
 app.post('/api/cases/escalate', async (req, res, next) => {
   try {
     const { caseNumber } = escalationSchema.parse(req.body)
-    const updated = await salesforce.escalateCase(req.customerId!, caseNumber)
+    const updated = await salesforce.escalateCase(req.customerId!, req.customerEmail!, caseNumber)
     saveCaseForUser(req.customerEmail!, { caseNumber: updated.CaseNumber, caseId: updated.Id, status: updated.Status, priority: updated.Priority })
     return res.json({ caseNumber: updated.CaseNumber, caseId: updated.Id, status: updated.Status, priority: updated.Priority })
   } catch (error) { return next(error) }
@@ -147,11 +147,11 @@ app.post('/api/cases/escalate', async (req, res, next) => {
 
 const commentSchema = z.object({ body: z.string().trim().min(1).max(10000) })
 app.post('/api/cases/:caseId/comments', async (req, res, next) => {
-  try { const input = commentSchema.parse(req.body); res.status(201).json(await salesforce.addComment(req.customerId!, req.params.caseId, input.body)) } catch (error) { next(error) }
+  try { const input = commentSchema.parse(req.body); res.status(201).json(await salesforce.addComment(req.customerId!, req.customerEmail!, req.params.caseId, input.body)) } catch (error) { next(error) }
 })
 
 app.get('/api/cases/:caseId/comments', async (req, res, next) => {
-  try { res.json(await salesforce.getComments(req.customerId!, req.params.caseId)) } catch (error) { next(error) }
+  try { res.json(await salesforce.getComments(req.customerId!, req.customerEmail!, req.params.caseId)) } catch (error) { next(error) }
 })
 
 app.post('/api/cases/:caseId/files', upload.single('file'), async (req, res, next) => {
@@ -159,7 +159,7 @@ app.post('/api/cases/:caseId/files', upload.single('file'), async (req, res, nex
     if (!req.file) return res.status(400).json({ error: { code: 'INVALID_FILE', message: 'A supported file is required' } })
     const caseId = typeof req.params.caseId === 'string' ? req.params.caseId : undefined
     if (!caseId) return res.status(400).json({ error: { code: 'INVALID_CASE_ID', message: 'A valid Case ID is required' } })
-    const result = await salesforce.uploadFile(req.customerId!, caseId, req.file.originalname, req.file.buffer.toString('base64'))
+    const result = await salesforce.uploadFile(req.customerId!, req.customerEmail!, caseId, req.file.originalname, req.file.buffer.toString('base64'))
     return res.status(201).json(result)
   } catch (error) { return next(error) }
 })
@@ -172,12 +172,14 @@ app.get('/api/knowledge', async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
-const createCaseSchema = z.object({ subject: z.string().trim().min(3).max(255).optional(), description: z.string().trim().min(5).max(10000), priority: z.enum(['High', 'Medium', 'Low']).optional() })
+const createCaseSchema = z.object({ subject: z.string().trim().min(3).max(255).optional(), description: z.string().trim().min(5).max(10000), priority: z.enum(['High', 'Medium', 'Low']).optional(), customerProductId: z.string().trim().regex(/^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/).optional() })
 app.post('/api/cases', async (req, res, next) => {
   try {
     const input = createCaseSchema.parse(req.body)
     const draft = input.subject ? { subject: input.subject, description: input.description, priority: input.priority ?? 'Medium' } : await generateCaseDraft(input.description)
-    const created = await salesforce.createCase({ ContactId: req.customerId!, Subject: draft.subject, Description: draft.description, Priority: draft.priority, Origin: 'Web' })
+    const caseFields: Record<string, string> = { ContactId: req.customerId!, Subject: draft.subject, Description: draft.description, Priority: draft.priority, Origin: 'Web' }
+    if (input.customerProductId) caseFields.Customer_Product__c = input.customerProductId
+    const created = await salesforce.createCase(caseFields, req.customerEmail!)
     saveCaseForUser(req.customerEmail!, { caseNumber: created.caseNumber, caseId: created.id, status: created.status, priority: draft.priority })
     res.status(201).json({ ...created, subject: created.subject, description: draft.description, priority: draft.priority })
   } catch (error) {
