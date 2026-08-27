@@ -8,22 +8,23 @@ import { config } from '../config.js'
 const SESSION_COOKIE = 'support_session'
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 const sessions = new Map<string, { customerId: string; email: string; expiresAt: number }>()
-type User = { customerId: string; email: string; name: string; salt: Buffer; passwordHash: Buffer }
-type StoredUser = { customerId: string; email: string; name: string; salt: string; passwordHash: string }
+export type SavedCase = { caseNumber: string; caseId: string; status: string; priority: string }
+type User = { customerId: string; email: string; name: string; salt: Buffer; passwordHash: Buffer; cases: SavedCase[] }
+type StoredUser = { customerId: string; email: string; name: string; salt: string; passwordHash: string; cases?: SavedCase[] }
 const users = new Map<string, User>()
 const usersFile = join(dirname(fileURLToPath(import.meta.url)), '../../data/users.json')
 
 function loadUsers() {
   try {
     const storedUsers = JSON.parse(readFileSync(usersFile, 'utf8')) as StoredUser[]
-    for (const user of storedUsers) users.set(user.email, { ...user, salt: Buffer.from(user.salt, 'base64'), passwordHash: Buffer.from(user.passwordHash, 'base64') })
+    for (const user of storedUsers) users.set(user.email, { ...user, cases: user.cases ?? [], salt: Buffer.from(user.salt, 'base64'), passwordHash: Buffer.from(user.passwordHash, 'base64') })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
 }
 
 function saveUsers() {
-  const storedUsers: StoredUser[] = [...users.values()].map((user) => ({ ...user, salt: user.salt.toString('base64'), passwordHash: user.passwordHash.toString('base64') }))
+  const storedUsers: StoredUser[] = [...users.values()].map((user) => ({ customerId: user.customerId, email: user.email, name: user.name, cases: user.cases, salt: user.salt.toString('base64'), passwordHash: user.passwordHash.toString('base64') }))
   mkdirSync(dirname(usersFile), { recursive: true })
   const temporaryFile = `${usersFile}.tmp`
   writeFileSync(temporaryFile, `${JSON.stringify(storedUsers, null, 2)}\n`, { mode: 0o600 })
@@ -40,7 +41,7 @@ loadUsers()
 const passwordSalt = createHash('sha256').update(config.DEMO_USER_EMAIL).digest().subarray(0, 16)
 const demoPasswordHash = hashPassword(config.DEMO_USER_PASSWORD, passwordSalt)
 const demoEmail = config.DEMO_USER_EMAIL.toLowerCase()
-if (!users.has(demoEmail)) users.set(demoEmail, { customerId: config.DEV_CUSTOMER_ID, email: demoEmail, name: 'Jordan Miller', salt: passwordSalt, passwordHash: demoPasswordHash })
+if (!users.has(demoEmail)) users.set(demoEmail, { customerId: config.DEV_CUSTOMER_ID, email: demoEmail, name: 'Jordan Miller', cases: [], salt: passwordSalt, passwordHash: demoPasswordHash })
 
 export function authenticateDemoUser(email: string, password: string) {
   const user = users.get(email.trim().toLowerCase())
@@ -53,7 +54,7 @@ export function registerUser(email: string, password: string, name: string) {
   const normalizedEmail = email.trim().toLowerCase()
   if (users.has(normalizedEmail)) return false
   const salt = randomBytes(16)
-  users.set(normalizedEmail, { customerId: `customer-${randomBytes(8).toString('hex')}`, email: normalizedEmail, name, salt, passwordHash: hashPassword(password, salt) })
+  users.set(normalizedEmail, { customerId: `customer-${randomBytes(8).toString('hex')}`, email: normalizedEmail, name, cases: [], salt, passwordHash: hashPassword(password, salt) })
   saveUsers()
   return true
 }
@@ -66,6 +67,13 @@ export function createSession(email = config.DEMO_USER_EMAIL) {
 }
 
 export function getUser(email: string) { return users.get(email.trim().toLowerCase()) }
+
+export function saveCaseForUser(email: string, savedCase: SavedCase) {
+  const user = getUser(email)
+  if (!user) return
+  user.cases = [savedCase, ...user.cases.filter((item) => item.caseId !== savedCase.caseId)]
+  saveUsers()
+}
 
 function getCookie(req: Request, name: string) {
   const cookies = req.header('cookie')?.split(';').map((item) => item.trim()) ?? []

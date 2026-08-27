@@ -16,7 +16,7 @@ type CaseItem = {
   number: string
   subject: string
   product: string
-  status: 'In Progress' | 'Waiting for Customer' | 'Resolved'
+  status: 'In Progress' | 'Waiting for Customer' | 'Resolved' | 'Escalated'
   priority: 'High' | 'Medium' | 'Low'
   created: string
   updated: string
@@ -48,13 +48,17 @@ type ProductItem = { name: string; modelNumber: string; purchased: string; warra
 const products: ProductItem[] = []
 
 const articles = [
-  { title: 'How to pair your AeroSense device', category: 'Getting started', read: '4 min read' },
-  { title: 'Understanding filter replacement alerts', category: 'Maintenance', read: '3 min read' },
-  { title: 'Resetting your AeroSense Pro', category: 'Troubleshooting', read: '5 min read' },
-  { title: 'Warranty and service coverage', category: 'Account & warranty', read: '2 min read' },
+  { title: 'How to pair your AeroSense device', category: 'Getting started', read: '4 min read', content: 'Turn on Bluetooth, open the Airwise app, and keep your AeroSense device close to your phone. Select Add device, choose your model, and follow the pairing prompts. If the device is not discovered, restart Bluetooth and try again.' },
+  { title: 'Understanding filter replacement alerts', category: 'Maintenance', read: '3 min read', content: 'A filter alert means the current filter is ready to be replaced. Turn off the device, remove the old filter, and check the compartment for packaging or debris. Insert the replacement filter firmly, then turn the device back on to clear the alert.' },
+  { title: 'Resetting your AeroSense Pro', category: 'Troubleshooting', read: '5 min read', content: 'Power off your AeroSense Pro, then press and hold the reset button for 10 seconds. Release it when the status light begins to pulse and wait for the device to restart. A reset can remove saved settings, so configure your preferences again afterward.' },
+  { title: 'Warranty and service coverage', category: 'Account & warranty', read: '2 min read', content: 'Warranty coverage depends on the registered device and purchase date. Keep your proof of purchase available when requesting service. For an account-specific coverage check, create a support case and include your device model and serial number.' },
 ]
 
 type ChatMessage = { sender: 'bot' | 'user'; text: string }
+
+function getInitials(name: string) {
+  return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()
+}
 
 const chatTopics = [
   { label: 'Raise a case', keywords: ['raise a case', 'create a case', 'open a case', 'support request'], reply: 'I can help you raise a support case. Please add the issue subject and details in the case form.' },
@@ -79,13 +83,16 @@ function App() {
   const [filter, setFilter] = useState('All cases')
   const [search, setSearch] = useState('')
   const [knowledgeSearch, setKnowledgeSearch] = useState('')
+  const [selectedArticle, setSelectedArticle] = useState<typeof articles[number] | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [showRegister, setShowRegister] = useState(false)
   const [newComment, setNewComment] = useState('')
   const [uploadMessage, setUploadMessage] = useState('')
   const [chatOpen, setChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([{ sender: 'bot', text: 'Hi! I can help troubleshoot your Airwise device. What is going wrong?' }])
   const [awaitingCaseDescription, setAwaitingCaseDescription] = useState(false)
+    const [awaitingEscalationCaseNumber, setAwaitingEscalationCaseNumber] = useState(false)
   const [creatingCase, setCreatingCase] = useState(false)
   const [chatLoading, setChatLoading] = useState(false)
 
@@ -111,7 +118,7 @@ function App() {
     ])
       .then(([caseResult, productResult]) => {
         if (caseResult.status === 'fulfilled' && caseResult.value.records?.length) {
-          const liveCases = caseResult.value.records.map((item) => ({ id: item.Id, number: item.CaseNumber, subject: item.Subject, product: item.Product__r?.Name ?? 'Supported product', status: ['In Progress', 'Waiting for Customer', 'Resolved'].includes(item.Status) ? item.Status as CaseItem['status'] : 'In Progress', priority: ['High', 'Medium', 'Low'].includes(item.Priority) ? item.Priority as CaseItem['priority'] : 'Medium', created: new Date(item.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }), updated: 'Recently', description: item.Description ?? '', comments: [] }))
+          const liveCases = caseResult.value.records.map((item) => ({ id: item.Id, number: item.CaseNumber, subject: item.Subject, product: item.Product__r?.Name ?? 'Supported product', status: ['In Progress', 'Waiting for Customer', 'Resolved', 'Escalated'].includes(item.Status) ? item.Status as CaseItem['status'] : 'In Progress', priority: ['High', 'Medium', 'Low'].includes(item.Priority) ? item.Priority as CaseItem['priority'] : 'Medium', created: new Date(item.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }), updated: 'Recently', description: item.Description ?? '', comments: [] }))
           setCases(liveCases)
           setSelectedCaseId(liveCases[0].id)
         } else if (caseResult.status === 'fulfilled') setCases([])
@@ -140,7 +147,7 @@ function App() {
           number: caseData.CaseNumber,
           subject: caseData.Subject,
           product: caseData.Product__r?.Name ?? item.product,
-          status: ['In Progress', 'Waiting for Customer', 'Resolved'].includes(caseData.Status) ? caseData.Status as CaseItem['status'] : item.status,
+          status: ['In Progress', 'Waiting for Customer', 'Resolved', 'Escalated'].includes(caseData.Status) ? caseData.Status as CaseItem['status'] : item.status,
           priority: ['High', 'Medium', 'Low'].includes(caseData.Priority) ? caseData.Priority as CaseItem['priority'] : item.priority,
           created: new Date(caseData.CreatedDate).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
           description: caseData.Description ?? '',
@@ -194,11 +201,39 @@ function App() {
     }
   }
 
+  const createProduct = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    try {
+      const result = await apiRequest<{ Id: string; Name: string; Model_Number__c?: string; Purchase_Date__c?: string }>('/api/products', { method: 'POST', body: JSON.stringify({ name: String(form.get('name')), modelNumber: String(form.get('modelNumber')), purchaseDate: String(form.get('purchaseDate')) }) })
+      setProductList((current) => [{ name: result.Name, modelNumber: result.Model_Number__c ?? 'Model unavailable', purchased: result.Purchase_Date__c ? new Date(result.Purchase_Date__c).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) : 'Not available', warranty: 'Warranty information unavailable', accent: current.length % 2 ? 'coral' : 'mint' }, ...current])
+      setShowRegister(false)
+      setView('Products')
+      setProductError('')
+    } catch (error) {
+      setProductError(error instanceof Error ? error.message : 'The product could not be registered in Salesforce.')
+    }
+  }
+
   const sendChatMessage = async (message = chatInput) => {
     const text = message.trim()
     if (!text || creatingCase || chatLoading) return
     const lowerText = text.toLowerCase()
     const wantsCase = ['raise a case', 'create a case', 'open a case', 'support request', 'talk to support'].some((keyword) => lowerText.includes(keyword))
+    const wantsEscalation = ['escalate', 'high priority', 'make it urgent', 'urgent case'].some((keyword) => lowerText.includes(keyword))
+    if (awaitingEscalationCaseNumber) {
+      setChatMessages((current) => [...current, { sender: 'user', text }])
+      setAwaitingEscalationCaseNumber(false)
+      setChatLoading(true)
+      apiRequest<{ caseNumber: string; caseId: string; status: string; priority: string }>('/api/cases/escalate', { method: 'POST', body: JSON.stringify({ caseNumber: text }) })
+        .then((result) => {
+          setCases((current) => current.map((item) => item.id === result.caseId || item.number === result.caseNumber ? { ...item, status: result.status as CaseItem['status'], priority: 'High' } : item))
+          setChatMessages((current) => [...current, { sender: 'bot', text: `Case ${result.caseNumber} is now ${result.status} with ${result.priority} priority.` }])
+        })
+        .catch((error) => setChatMessages((current) => [...current, { sender: 'bot', text: error instanceof Error ? error.message : 'I could not escalate that case. Please check the Case Number and try again.' }]))
+        .finally(() => setChatLoading(false))
+      return
+    }
     if (awaitingCaseDescription) {
       setChatMessages((current) => [...current, { sender: 'user', text }])
       setChatInput('')
@@ -226,6 +261,11 @@ function App() {
       setAwaitingCaseDescription(true)
       return
     }
+    if (wantsEscalation) {
+      setAwaitingEscalationCaseNumber(true)
+      setChatMessages((current) => [...current, { sender: 'bot', text: 'Please send the Case Number you want me to escalate. I will verify it belongs to your account before updating Salesforce.' }])
+      return
+    }
     setChatLoading(true)
     apiRequest<{ reply: string }>('/api/chat', { method: 'POST', body: JSON.stringify({ messages: conversation }) })
       .then((result) => setChatMessages((current) => [...current, { sender: 'bot', text: result.reply }]))
@@ -239,16 +279,17 @@ function App() {
   return (
     <div className="portal-shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">A</span><span>airwise</span></div>
+        <div className="brand"><span className="brand-mark">A</span><span>AirWise</span></div>
         <div className="workspace-label">CUSTOMER PORTAL</div>
         <nav aria-label="Primary navigation">
           {(['Overview', 'Cases', 'Products', 'Knowledge'] as View[]).map((item) => <button key={item} className={`nav-item ${view === item ? 'active' : ''}`} onClick={() => setView(item)}><span className="nav-dot">{item === 'Overview' ? '◈' : item === 'Cases' ? '▤' : item === 'Products' ? '□' : '?'}</span>{item}</button>)}
         </nav>
-        <div className="sidebar-bottom"><div className="help-card"><span className="help-icon">?</span><div><strong>Need a hand?</strong><small>Our team is here for you.</small></div><button aria-label="Contact support">→</button></div><button className="profile" onClick={logout}><span className="avatar">JM</span><span><strong>{user.name}</strong><small>Log out</small></span><span className="more">•••</span></button></div>
+        <div className="sidebar-bottom"><button className="profile" onClick={logout}><span className="avatar">{getInitials(user.name)}</span><span><strong>{user.name}</strong><small>Log out</small></span><span className="more">•••</span></button></div>
       </aside>
 
       <main className="main-content">
-        <header className="topbar"><div className="crumb"><span>Workspace</span><b>/</b><strong>{view}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Notifications">♢<span className="notification-dot" /></button><span className="top-avatar">JM</span></div></header>
+        {view === 'Products' && <div className="product-register-bar"><button className="primary-button" type="button" onClick={() => setShowRegister(true)}><span>+</span> Register a product</button></div>}
+        <header className="topbar"><div className="crumb"><span>Workspace</span><b>/</b><strong>{view}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Notifications">♢<span className="notification-dot" /></button><span className="top-avatar" aria-label={`${user.name} initials`}>{getInitials(user.name)}</span></div></header>
 
         {(dataLoading || detailLoading) && <div className="data-banner">Syncing your workspace with support data...</div>}{dataError && <div className="data-banner warning"><span>{dataError}</span><button type="button" aria-label="Dismiss data warning" onClick={() => setDataError('')}>×</button></div>}
         {view === 'Overview' && <section className="page animate-in"><div className="page-heading"><div><p className="eyebrow">TUESDAY, AUGUST 25, 2026</p><h1>Good morning, {user.name} <span>✦</span></h1><p className="lede">Here’s the latest on your products and support requests.</p></div><button className="primary-button" onClick={() => setShowCreate(true)}><span>+</span> Create a case</button></div><div className="stat-grid"><div className="stat-card dark"><span className="stat-label">OPEN CASES</span><strong>{cases.filter((item) => item.status !== 'Resolved').length.toString().padStart(2, '0')}</strong><span className="stat-note">Current support requests <i>↗</i></span><div className="sparkline">╱╲╱╲╱╲╱</div></div><div className="stat-card"><span className="stat-label">PRODUCTS</span><strong>{productList.length.toString().padStart(2, '0')}</strong><span className="stat-note">Registered devices <i className="green">●</i></span></div><div className="stat-card"><span className="stat-label">AVERAGE RESPONSE</span><strong>4h 12m</strong><span className="stat-note">Typically within one day <i className="green">●</i></span></div></div><div className="content-grid"><div className="panel cases-panel"><div className="panel-heading"><div><p className="eyebrow">YOUR SUPPORT</p><h2>Recent cases</h2></div><button className="text-button" onClick={() => setView('Cases')}>View all <span>→</span></button></div>{cases.length ? cases.slice(0, 3).map((item) => <CaseRow key={item.id} item={item} onClick={() => { setSelectedCaseId(item.id); setView('Cases') }} />) : <div className="empty-state"><strong>No cases found</strong><p>Salesforce has no cases for this customer.</p></div>}</div><div className="panel products-panel"><div className="panel-heading"><div><p className="eyebrow">YOUR DEVICES</p><h2>Products</h2></div><button className="text-button" onClick={() => setView('Products')}>View all <span>→</span></button></div>{productList.length ? productList.map((product) => <ProductRow key={product.modelNumber} product={product} />) : <div className="empty-state"><strong>No products found</strong><p>Salesforce has no products for this customer.</p></div>}<button className="add-product" onClick={() => setView('Products')}>+ Register a product</button></div></div><div className="insight-banner"><span className="insight-spark">✦</span><div><strong>Tip from Airwise</strong><p>Regular filter changes help your AeroSense Pro perform at its best.</p></div><button onClick={() => { setView('Knowledge'); setKnowledgeSearch('filter') }}>Read guide <span>→</span></button></div></section>}
@@ -259,10 +300,12 @@ function App() {
         {view === 'Products' && <section className="page animate-in"><div className="page-heading compact"><div><p className="eyebrow">YOUR DEVICES</p><h1>Products</h1><p className="lede">Everything registered to your account, in one place.</p></div><button className="secondary-button" onClick={() => setView('Knowledge')}>View care guides <span>→</span></button></div>{productList.length ? <div className="product-grid">{productList.map((product) => <div className={`product-card ${product.accent}`} key={product.modelNumber}><div className="product-visual"><span className="device-ring" /><span className="device-label">AIRWISE</span></div><div className="product-info"><span className="coverage">● WARRANTY ACTIVE</span><h2>{product.name}</h2><dl><div><dt>Model number</dt><dd>{product.modelNumber}</dd></div><div><dt>Purchase date</dt><dd>{product.purchased}</dd></div></dl><button className="outline-button" onClick={() => setShowCreate(true)}>Get support <span>→</span></button></div></div>)}</div> : <div className="panel empty-state"><strong>No products found</strong><p>{productError || 'Salesforce has no products for this customer.'}</p></div>}</section>}
   {view === 'Products' && <section className="page animate-in"><div className="page-heading compact"><div><p className="eyebrow">YOUR DEVICES</p><h1>Products</h1><p className="lede">Everything registered to your account, in one place.</p></div><button className="secondary-button" onClick={() => setView('Knowledge')}>View care guides <span>→</span></button></div>{productList.length ? <div className="product-grid">{productList.map((product) => <div className={`product-card ${product.accent}`} key={product.modelNumber}><div className="product-visual"><span className="device-ring" /><span className="device-label">AIRWISE</span></div><div className="product-info"><span className="coverage">● WARRANTY ACTIVE</span><h2>{product.name}</h2><dl><div><dt>Model number</dt><dd>{product.modelNumber}</dd></div><div><dt>Purchase date</dt><dd>{product.purchased}</dd></div></dl><button className="outline-button" onClick={() => setShowCreate(true)}>Get support <span>→</span></button></div></div>)}</div> : <div className="panel empty-state"><strong>No products found</strong><p>{productError || 'Salesforce has no products for this customer.'}</p></div>}</section>}
 
-        {view === 'Knowledge' && <section className="page animate-in"><div className="knowledge-hero"><p className="eyebrow">SELF-SERVICE LIBRARY</p><h1>Find your answer.</h1><p>Quick, clear guides for getting the most from your Airwise products.</p><div className="large-search"><span>⌕</span><input autoFocus aria-label="Search knowledge base" value={knowledgeSearch} onChange={(event) => setKnowledgeSearch(event.target.value)} placeholder="Search guides, topics, or questions" /></div></div><div className="article-heading"><div><p className="eyebrow">{knowledgeSearch ? 'SEARCH RESULTS' : 'POPULAR GUIDES'}</p><h2>{knowledgeSearch ? `${filteredArticles.length} guides found` : 'Start here'}</h2></div></div><div className="article-grid">{filteredArticles.map((article, index) => <article className="article-card" key={article.title}><span className={`article-number n${index}`}>0{index + 1}</span><div><span className="article-category">{article.category}</span><h3>{article.title}</h3><p>{article.read}</p></div><span className="article-arrow">↗</span></article>)}</div></section>}
+        {view === 'Knowledge' && <section className="page animate-in"><div className="knowledge-hero"><p className="eyebrow">SELF-SERVICE LIBRARY</p><h1>Find your answer.</h1><p>Quick, clear guides for getting the most from your Airwise products.</p><div className="large-search"><span>⌕</span><input autoFocus aria-label="Search knowledge base" value={knowledgeSearch} onChange={(event) => setKnowledgeSearch(event.target.value)} placeholder="Search guides, topics, or questions" /></div></div><div className="article-heading"><div><p className="eyebrow">{knowledgeSearch ? 'SEARCH RESULTS' : 'POPULAR GUIDES'}</p><h2>{knowledgeSearch ? `${filteredArticles.length} guides found` : 'Start here'}</h2></div></div><div className="article-grid">{filteredArticles.map((article, index) => <button className="article-card" type="button" key={article.title} onClick={() => setSelectedArticle(article)}><span className={`article-number n${index}`}>0{index + 1}</span><span className="article-card-copy"><span className="article-category">{article.category}</span><strong>{article.title}</strong><span>{article.read}</span></span><span className="article-arrow">↗</span></button>)}</div></section>}
       </main>
       <button className={`chat-launcher ${chatOpen ? 'open' : ''}`} type="button" aria-label={chatOpen ? 'Close troubleshooting chat' : 'Open troubleshooting chat'} onClick={() => setChatOpen((current) => !current)}><span className="chat-icon">◌</span><span>{chatOpen ? 'Close chat' : 'Support chat'}</span></button>
       {chatOpen && <ChatPanel input={chatInput} messages={chatMessages} setInput={setChatInput} onSend={sendChatMessage} onClose={() => setChatOpen(false)} creatingCase={creatingCase} chatLoading={chatLoading} />}
+      {selectedArticle && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedArticle(null)}><article className="article-modal"><div className="modal-header"><div><p className="eyebrow">{selectedArticle.category}</p><h2>{selectedArticle.title}</h2></div><button type="button" className="close-button" aria-label="Close article" onClick={() => setSelectedArticle(null)}>×</button></div><p>{selectedArticle.content}</p><button type="button" className="primary-button" onClick={() => setSelectedArticle(null)}>Done</button></article></div>}
+      {showRegister && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowRegister(false)}><form className="modal" onSubmit={createProduct}><div className="modal-header"><div><p className="eyebrow">YOUR DEVICES</p><h2>Register a product</h2></div><button type="button" className="close-button" aria-label="Close registration form" onClick={() => setShowRegister(false)}>×</button></div><label>Product name<input name="name" required placeholder="AeroSense Pro" /></label><label>Model number<input name="modelNumber" required placeholder="AS-PRO-100" /></label><label>Date of purchase<input name="purchaseDate" type="date" required /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowRegister(false)}>Cancel</button><button className="primary-button" type="submit">Add product <span>→</span></button></div></form></div>}
       {showCreate && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !creatingCase && setShowCreate(false)}><form className="modal" onSubmit={createCase}><div className="modal-header"><div><p className="eyebrow">NEW REQUEST</p><h2>Create a support case</h2></div><button type="button" className="close-button" onClick={() => !creatingCase && setShowCreate(false)} disabled={creatingCase}>×</button></div><label>Subject<input name="subject" required placeholder="What can we help with?" /></label><label>Description<textarea name="description" required placeholder="Tell us what happened..." rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowCreate(false)} disabled={creatingCase}>Cancel</button><button className="primary-button" type="submit" disabled={creatingCase}>{creatingCase ? <><span className="loading-spinner" aria-hidden="true" /> Creating case...</> : <>Submit case <span>→</span></>}</button></div></form></div>}
     </div>
   )
@@ -302,7 +345,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: { email: string; name: strin
 }
 
 function CaseRow({ item, onClick, selected = false }: { item: CaseItem; onClick: () => void; selected?: boolean }) {
-  return <button className={`case-row ${selected ? 'selected' : ''}`} onClick={onClick}><span className={`case-status ${item.status.toLowerCase().replaceAll(' ', '-')}`} /><span className="case-row-main"><strong>{item.subject}</strong><small>{item.id} <b>·</b> {item.product}</small></span><span className={`status-pill ${item.status.toLowerCase().replaceAll(' ', '-')}`}>{item.status}</span><span className="row-arrow">→</span></button>
+  return <button className={`case-row ${selected ? 'selected' : ''}`} onClick={onClick}><span className={`case-status ${item.status.toLowerCase().replaceAll(' ', '-')}`} /><span className="case-row-main"><strong>{item.subject}</strong><small>Case {item.number} <b>·</b> {item.product}</small></span><span className={`status-pill ${item.status.toLowerCase().replaceAll(' ', '-')}`}>{item.status}</span><span className="row-arrow">→</span></button>
 }
 
 function ProductRow({ product }: { product: ProductItem }) { return <div className="product-row"><span className={`product-thumb ${product.accent}`}><span /></span><span><strong>{product.name}</strong><small>{product.modelNumber}</small></span><span className="warranty-dot">●</span></div> }
@@ -316,7 +359,7 @@ function ChatPanel({ input, messages, setInput, onSend, onClose, creatingCase, c
 }
 
 function CaseDetail({ item, newComment, setNewComment, addComment, uploadMessage, onUpload }: { item: CaseItem; newComment: string; setNewComment: (value: string) => void; addComment: () => void; uploadMessage: string; onUpload: () => void }) {
-  return <div className="panel case-detail"><div className="detail-top"><div><span className="case-id">CASE {item.id}</span><h2>{item.subject}</h2></div><span className={`status-pill ${item.status.toLowerCase().replaceAll(' ', '-')}`}>{item.status}</span></div><div className="detail-meta"><span><small>Product</small><strong>{item.product}</strong></span><span><small>Created</small><strong>{item.created}</strong></span><span><small>Priority</small><strong>{item.priority}</strong></span></div><p className="detail-description">{item.description}</p><div className="conversation"><div className="conversation-title"><span>Conversation</span><small>{item.comments.length} messages</small></div>{item.comments.map((comment, index) => <div className={`message ${comment.author === 'You' ? 'customer' : ''}`} key={`${comment.time}-${index}`}><span className="message-avatar">{comment.author === 'You' ? 'JM' : 'MC'}</span><div><div className="message-meta"><strong>{comment.author}</strong><small>{comment.time}</small></div><p>{comment.body}</p></div></div>)}<div className="comment-box"><textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder="Write a reply..." rows={2} /><div><button className="attach-button" type="button" onClick={onUpload}>＋ Attach file</button>{uploadMessage && <small className="upload-message">{uploadMessage}</small>}<button className="send-button" type="button" onClick={addComment}>Send <span>→</span></button></div></div></div></div>
+  return <div className="panel case-detail"><div className="detail-top"><div><span className="case-id">CASE {item.number}</span><h2>{item.subject}</h2></div><span className={`status-pill ${item.status.toLowerCase().replaceAll(' ', '-')}`}>{item.status}</span></div><div className="detail-meta"><span><small>Product</small><strong>{item.product}</strong></span><span><small>Created</small><strong>{item.created}</strong></span><span><small>Priority</small><strong>{item.priority}</strong></span></div><p className="detail-description">{item.description}</p><div className="conversation"><div className="conversation-title"><span>Conversation</span><small>{item.comments.length} messages</small></div>{item.comments.map((comment, index) => <div className={`message ${comment.author === 'You' ? 'customer' : ''}`} key={`${comment.time}-${index}`}><span className="message-avatar">{comment.author === 'You' ? 'JM' : 'MC'}</span><div><div className="message-meta"><strong>{comment.author}</strong><small>{comment.time}</small></div><p>{comment.body}</p></div></div>)}<div className="comment-box"><textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder="Write a reply..." rows={2} /><div><button className="attach-button" type="button" onClick={onUpload}>＋ Attach file</button>{uploadMessage && <small className="upload-message">{uploadMessage}</small>}<button className="send-button" type="button" onClick={addComment}>Send <span>→</span></button></div></div></div></div>
 }
 
 export default App

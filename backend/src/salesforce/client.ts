@@ -49,7 +49,7 @@ export class SalesforceClient {
       const message = Array.isArray(details) ? details[0]?.message : details?.message
       throw new SalesforceError(response.status, message ?? `Salesforce request failed (${response.status})`)
     }
-    return response.json() as Promise<T>
+    return response.status === 204 ? undefined as T : response.json() as Promise<T>
   }
 
   async query<T>(soql: string) {
@@ -64,6 +64,15 @@ export class SalesforceClient {
   async getProducts(customerId: string) {
     const contactId = salesforceContactId(customerId)
     return this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c FROM Customer_Product__c WHERE Contact__c = '${contactId}'`)
+  }
+
+  async createProduct(customerId: string, fields: { name: string; modelNumber: string; purchaseDate: string }) {
+    const contactId = salesforceContactId(customerId)
+    const created = await this.request<{ id: string }>('/sobjects/Customer_Product__c', { method: 'POST', body: JSON.stringify({ Contact__c: contactId, Name: fields.name, Model_Number__c: fields.modelNumber, Purchase_Date__c: fields.purchaseDate }) })
+    const result = await this.query<SalesforceProduct>(`SELECT Id, Name, Model_Number__c, Purchase_Date__c FROM Customer_Product__c WHERE Id = '${created.id.replaceAll("'", "\\'")}' AND Contact__c = '${contactId}' LIMIT 1`)
+    const product = result.records?.[0]
+    if (!product) throw new SalesforceError(502, 'Salesforce created the product but did not return its details')
+    return product
   }
 
   async getCases(customerId: string, status?: string) {
@@ -85,6 +94,16 @@ export class SalesforceClient {
     const contactId = salesforceContactId(customerId)
     const result = await this.query<SalesforceCase>(`SELECT Id, CaseNumber, Subject, Status, Priority, CreatedDate, Description FROM Case WHERE Id = '${caseId.replaceAll("'", "\\'")}' AND ContactId = '${contactId}' LIMIT 1`)
     return result.records?.[0]
+  }
+
+  async escalateCase(customerId: string, caseNumber: string) {
+    const contactId = salesforceContactId(customerId)
+    const escapedNumber = caseNumber.replaceAll("'", "\\'")
+    const result = await this.query<Pick<SalesforceCase, 'Id' | 'CaseNumber' | 'Status' | 'Priority'>>(`SELECT Id, CaseNumber, Status, Priority FROM Case WHERE CaseNumber = '${escapedNumber}' AND ContactId = '${contactId}' LIMIT 1`)
+    const item = result.records?.[0]
+    if (!item) throw new SalesforceError(404, 'Case not found')
+    await this.request<void>(`/sobjects/Case/${item.Id}`, { method: 'PATCH', body: JSON.stringify({ Status: 'Escalated', Priority: 'High' }) })
+    return { ...item, Status: 'Escalated', Priority: 'High' }
   }
 
   async addComment(customerId: string, caseId: string, body: string) {

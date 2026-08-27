@@ -4,7 +4,7 @@ import helmet from 'helmet'
 import multer from 'multer'
 import { z } from 'zod'
 import { config } from './config.js'
-import { authenticateDemoUser, clearSession, createSession, getUser, registerUser, requireCustomer, setSessionCookie } from './middleware/auth.js'
+import { authenticateDemoUser, clearSession, createSession, getUser, registerUser, requireCustomer, saveCaseForUser, setSessionCookie } from './middleware/auth.js'
 import { salesforce, SalesforceError } from './salesforce/client.js'
 
 const app = express()
@@ -21,7 +21,7 @@ app.post('/api/auth/login', (req, res) => {
   if (!authenticateDemoUser(email, password)) return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Email or password is incorrect' } })
   const user = getUser(email)!
   setSessionCookie(res, createSession(email))
-  return res.json({ user: { email: user.email, name: user.name } })
+  return res.json({ user: { email: user.email, name: user.name, cases: user.cases } })
 })
 
 const registrationSchema = z.object({ email: z.string().email(), password: z.string().min(8), name: z.string().trim().min(2).max(80) })
@@ -41,7 +41,7 @@ app.post('/api/auth/logout', (req, res) => { clearSession(req, res); res.status(
 
 app.get('/api/auth/me', requireCustomer, (req, res) => {
   const user = req.customerEmail ? getUser(req.customerEmail) : undefined
-  return res.json({ user: { id: req.customerId, email: req.customerEmail, name: user?.name ?? req.customerEmail } })
+  return res.json({ user: { id: req.customerId, email: req.customerEmail, name: user?.name ?? req.customerEmail, cases: user?.cases ?? [] } })
 })
 
 app.use('/api', requireCustomer)
@@ -114,6 +114,15 @@ app.get('/api/products', async (req, res, next) => {
   try { res.json(await salesforce.getProducts(req.customerId!)) } catch (error) { next(error) }
 })
 
+const productSchema = z.object({ name: z.string().trim().min(1).max(255), modelNumber: z.string().trim().min(1).max(100), purchaseDate: z.string().date() })
+app.post('/api/products', async (req, res, next) => {
+  try {
+    const input = productSchema.parse(req.body)
+    const product = await salesforce.createProduct(req.customerId!, input)
+    return res.status(201).json(product)
+  } catch (error) { return next(error) }
+})
+
 app.get('/api/cases', async (req, res, next) => {
   try { res.json(await salesforce.getCases(req.customerId!, typeof req.query.status === 'string' ? req.query.status : undefined)) } catch (error) { next(error) }
 })
@@ -123,6 +132,16 @@ app.get('/api/cases/:caseId', async (req, res, next) => {
     const item = await salesforce.getCase(req.customerId!, req.params.caseId)
     if (!item) return res.status(404).json({ error: { code: 'CASE_NOT_FOUND', message: 'Case not found' } })
     return res.json(item)
+  } catch (error) { return next(error) }
+})
+
+const escalationSchema = z.object({ caseNumber: z.string().trim().min(1).max(40) })
+app.post('/api/cases/escalate', async (req, res, next) => {
+  try {
+    const { caseNumber } = escalationSchema.parse(req.body)
+    const updated = await salesforce.escalateCase(req.customerId!, caseNumber)
+    saveCaseForUser(req.customerEmail!, { caseNumber: updated.CaseNumber, caseId: updated.Id, status: updated.Status, priority: updated.Priority })
+    return res.json({ caseNumber: updated.CaseNumber, caseId: updated.Id, status: updated.Status, priority: updated.Priority })
   } catch (error) { return next(error) }
 })
 
@@ -159,6 +178,7 @@ app.post('/api/cases', async (req, res, next) => {
     const input = createCaseSchema.parse(req.body)
     const draft = input.subject ? { subject: input.subject, description: input.description, priority: input.priority ?? 'Medium' } : await generateCaseDraft(input.description)
     const created = await salesforce.createCase({ ContactId: req.customerId!, Subject: draft.subject, Description: draft.description, Priority: draft.priority, Origin: 'Web' })
+    saveCaseForUser(req.customerEmail!, { caseNumber: created.caseNumber, caseId: created.id, status: created.status, priority: draft.priority })
     res.status(201).json({ ...created, subject: created.subject, description: draft.description, priority: draft.priority })
   } catch (error) {
     if (error instanceof Error && error.message === 'Gemma is not configured') return res.status(503).json({ error: { code: 'GEMMA_NOT_CONFIGURED', message: 'Automatic case creation is not configured yet' } })
